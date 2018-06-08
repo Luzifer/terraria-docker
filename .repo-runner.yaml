@@ -7,4 +7,5 @@ commands:
   - make publish
 
 environment:
+  ARCHS: linux/amd64 linux/arm
   CGO_ENABLED: 0
