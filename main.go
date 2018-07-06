@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
-	"time"
 
 	"github.com/Luzifer/rconfig"
 	log "github.com/sirupsen/logrus"
@@ -19,8 +20,6 @@ var (
 		LogLevel       string `flag:"log-level" default:"info" description:"Log level (debug, info, warn, error, fatal)"`
 		VersionAndExit bool   `flag:"version" default:"false" description:"Prints current version and exits"`
 	}{}
-
-	done = make(chan struct{}, 1)
 
 	version = "dev"
 )
@@ -48,38 +47,59 @@ func main() {
 	}
 	defer os.Remove(cfg.FiFoFile)
 
+	cmd := exec.Command(rconfig.Args()[1], rconfig.Args()[1:]...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		log.WithError(err).Fatal("Unable to create stdin pipe")
+	}
+
+	// StdIN processing to send commands to Terraria
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	go handleSignal(sigs)
+	go handleSignal(sigs, stdin)
 
-	go inputLoop()
+	go inputLoop(stdin)
 
-	for {
-		select {
-		case <-done:
-			log.Info("Waiting 5s until quit")
-			<-time.After(5 * time.Second) // Allow some time for terraria to quit gracefully
-			return
+	// StdOUT processing to react on log output
+	stdoutRead, stdoutWrite := io.Pipe()
+	cmd.Stdout = stdoutWrite
+	cmd.Stderr = stdoutWrite
+
+	go outputLoop(stdoutRead, stdin)
+
+	cmd.Run()
+}
+
+func outputLoop(in io.Reader, out io.Writer) {
+	scanner := bufio.NewScanner(in)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		log.Info(line)
+
+		if strings.Contains(line, "has left.") {
+			// A player left the server and after the last player
+			// left the server will not save anymore so we'll do
+			// that whenever a player leaves...
+			fmt.Fprintln(out, "save")
 		}
 	}
 }
 
-func inputLoop() {
+func inputLoop(comm io.Writer) {
 	for {
 		f, err := os.Open(cfg.FiFoFile)
 		if err != nil {
 			log.WithError(err).Error("Unable to (re)open fifo, quitting now")
-			done <- struct{}{}
-			continue
+			fmt.Fprintln(comm, "exit")
+			break
 		}
 		defer f.Close()
 
 		scanner := bufio.NewScanner(f)
 		for scanner.Scan() {
-			fmt.Println(scanner.Text())
-			if scanner.Text() == "exit" {
-				done <- struct{}{}
-			}
+			fmt.Fprintln(comm, scanner.Text())
 		}
 
 		switch scanner.Err() {
@@ -89,15 +109,13 @@ func inputLoop() {
 			// This is fine
 		default:
 			log.WithError(err).Error("Unable to read from fifo")
-			fmt.Println("exit")
-			done <- struct{}{}
+			fmt.Fprintln(comm, "exit")
 		}
 	}
 }
 
-func handleSignal(sigs chan os.Signal) {
+func handleSignal(sigs chan os.Signal, comm io.Writer) {
 	sig := <-sigs
 	log.WithField("signal", sig).Info("Received terminating singal")
-	fmt.Println("exit")
-	done <- struct{}{}
+	fmt.Fprintln(comm, "exit")
 }
