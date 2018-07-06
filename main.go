@@ -84,6 +84,11 @@ func outputLoop(in io.Reader, out io.Writer) {
 			// that whenever a player leaves...
 			fmt.Fprintln(out, "save")
 		}
+
+		if strings.Contains(line, "Backing up world file") {
+			// Announce a successful server save through console
+			fmt.Fprintln(out, "say World saved...")
+		}
 	}
 }
 
